@@ -134,6 +134,75 @@ fn monte_carlo_price_control_variate(params: &OptionParams, n_sims: usize) -> (f
     (corrected_mean, ci_95, beta)
 }
 
+/// Pricer Monte-Carlo combinant variates antithétiques ET control variate.
+///
+/// Pour chaque paire (Z, -Z), on calcule d'abord la moyenne antithétique du
+/// payoff et du control (sous-jacent actualisé), ce qui donne une observation
+/// "paire" par tirage de Z. On applique ensuite la correction control variate
+/// sur ces observations déjà antithétiques : beta est réestimé sur les
+/// quantités paire-moyennées (sa valeur diffère donc du beta du CV seul, car
+/// la variable de contrôle a elle-même une variance réduite par l'antithèse).
+///
+/// n_pairs paires sont simulées, soit 2*n_pairs tirages de sous-jacent au total.
+/// Retourne (prix, demi-largeur IC 95%, beta optimal estimé)
+fn monte_carlo_price_antithetic_control_variate(
+    params: &OptionParams,
+    n_pairs: usize,
+) -> (f64, f64, f64) {
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let mut rng = rand::thread_rng();
+    let discount = (-params.r * params.t).exp();
+    let control_mean_theoretical = params.s0; // E[e^{-rT} S_T] = S_0
+
+    let mut pair_payoffs: Vec<f64> = Vec::with_capacity(n_pairs);
+    let mut pair_controls: Vec<f64> = Vec::with_capacity(n_pairs);
+
+    for _ in 0..n_pairs {
+        let z: f64 = normal.sample(&mut rng);
+
+        let s_t_plus = simulate_terminal_price(params, z);
+        let s_t_minus = simulate_terminal_price(params, -z);
+
+        let payoff_plus = discount * call_payoff(s_t_plus, params.k);
+        let payoff_minus = discount * call_payoff(s_t_minus, params.k);
+        let control_plus = discount * s_t_plus;
+        let control_minus = discount * s_t_minus;
+
+        // Moyennes antithétiques par paire (une observation par tirage de Z)
+        pair_payoffs.push(0.5 * (payoff_plus + payoff_minus));
+        pair_controls.push(0.5 * (control_plus + control_minus));
+    }
+
+    let n = n_pairs as f64;
+    let payoff_mean: f64 = pair_payoffs.iter().sum::<f64>() / n;
+    let control_mean: f64 = pair_controls.iter().sum::<f64>() / n;
+
+    let cov: f64 = pair_payoffs
+        .iter()
+        .zip(pair_controls.iter())
+        .map(|(p, c)| (p - payoff_mean) * (c - control_mean))
+        .sum::<f64>()
+        / (n - 1.0);
+
+    let var_control: f64 = pair_controls
+        .iter()
+        .map(|c| (c - control_mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+
+    let beta = cov / var_control;
+
+    let corrected: Vec<f64> = pair_payoffs
+        .iter()
+        .zip(pair_controls.iter())
+        .map(|(p, c)| p - beta * (c - control_mean_theoretical))
+        .collect();
+
+    let (corrected_mean, ci_95) = mean_and_ci95(&corrected);
+
+    (corrected_mean, ci_95, beta)
+}
+
 /// Prix Black-Scholes analytique (pour vérification)
 fn black_scholes_call(params: &OptionParams) -> f64 {
     let d1 = ((params.s0 / params.k).ln()
@@ -165,34 +234,38 @@ fn main() {
     println!("Prix Black-Scholes analytique = {:.4}\n", bs_price);
 
     println!(
-        "{:>10} | {:^22} | {:^22} | {:^28}",
-        "N (sous-jacents)", "Standard", "Antithétique", "Control Variate"
+        "{:>10} | {:^20} | {:^20} | {:^24} | {:^24}",
+        "N (sous-jacents)", "Standard", "Antithétique", "Control Variate", "Antithétique + CV"
     );
-    println!("{}", "-".repeat(95));
+    println!("{}", "-".repeat(120));
 
     // Fichier CSV pour le script de visualisation Python (results.csv)
     let mut csv_file = File::create("results.csv").expect("impossible de créer results.csv");
     writeln!(
         csv_file,
-        "n,price_std,ci_std,price_anti,ci_anti,price_cv,ci_cv,beta,bs_price"
+        "n,price_std,ci_std,price_anti,ci_anti,price_cv,ci_cv,beta_cv,price_combined,ci_combined,beta_combined,bs_price"
     )
     .unwrap();
 
     for n in [1_000, 10_000, 100_000, 500_000, 1_000_000] {
-        // Même budget de calcul (n tirages de sous-jacent) pour les 3 méthodes
+        // Même budget de calcul (n tirages de sous-jacent) pour toutes les méthodes
         let (price_std, ci_std) = monte_carlo_price(&params, n);
         let (price_anti, ci_anti) = monte_carlo_price_antithetic(&params, n / 2);
-        let (price_cv, ci_cv, beta) = monte_carlo_price_control_variate(&params, n);
+        let (price_cv, ci_cv, beta_cv) = monte_carlo_price_control_variate(&params, n);
+        let (price_combined, ci_combined, beta_combined) =
+            monte_carlo_price_antithetic_control_variate(&params, n / 2);
 
         println!(
-            "{:>10} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} (β={:.3})",
-            n, price_std, ci_std, price_anti, ci_anti, price_cv, ci_cv, beta
+            "{:>10} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} (β={:.3}) | {:.4} ± {:.4} (β={:.3})",
+            n, price_std, ci_std, price_anti, ci_anti, price_cv, ci_cv, beta_cv,
+            price_combined, ci_combined, beta_combined
         );
 
         writeln!(
             csv_file,
-            "{},{},{},{},{},{},{},{},{}",
-            n, price_std, ci_std, price_anti, ci_anti, price_cv, ci_cv, beta, bs_price
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            n, price_std, ci_std, price_anti, ci_anti, price_cv, ci_cv, beta_cv,
+            price_combined, ci_combined, beta_combined, bs_price
         )
         .unwrap();
     }
@@ -201,14 +274,27 @@ fn main() {
     let (_, ci_std) = monte_carlo_price(&params, 1_000_000);
     let (_, ci_anti) = monte_carlo_price_antithetic(&params, 500_000);
     let (_, ci_cv, _) = monte_carlo_price_control_variate(&params, 1_000_000);
+    let (_, ci_combined, _) = monte_carlo_price_antithetic_control_variate(&params, 500_000);
 
     println!(
-        "Antithétique : réduction de l'IC = {:.1}%",
+        "Antithétique         : réduction de l'IC = {:.1}%",
         100.0 * (1.0 - ci_anti / ci_std)
     );
     println!(
-        "Control Variate : réduction de l'IC = {:.1}%",
+        "Control Variate      : réduction de l'IC = {:.1}%",
         100.0 * (1.0 - ci_cv / ci_std)
+    );
+    println!(
+        "Antithétique + CV    : réduction de l'IC = {:.1}% (vs standard)",
+        100.0 * (1.0 - ci_combined / ci_std)
+    );
+    println!(
+        "Antithétique + CV    : réduction de l'IC = {:.1}% (vs antithétique seule)",
+        100.0 * (1.0 - ci_combined / ci_anti)
+    );
+    println!(
+        "Antithétique + CV    : réduction de l'IC = {:.1}% (vs control variate seul)",
+        100.0 * (1.0 - ci_combined / ci_cv)
     );
 
     println!("\nPrix Black-Scholes analytique = {:.4}", bs_price);
