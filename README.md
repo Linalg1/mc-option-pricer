@@ -59,14 +59,38 @@ log-log), mais avec des constantes multiplicatives très différentes — c'est
 cette constante, et non le taux de convergence, que les techniques de
 réduction de variance améliorent.
 
+## Tests et intégration continue
+
+Le projet contient une suite de tests reproductibles. Les estimateurs acceptent un générateur pseudo-aléatoire injecté afin que les tests Monte-Carlo utilisent une graine fixe plutôt que `thread_rng()`. La suite vérifie notamment :
+
+- la définition du payoff et la simulation GBM dans un cas déterministe ;
+- le calcul de la moyenne et de l'intervalle de confiance ;
+- le prix Black-Scholes sur une valeur de référence ;
+- l'accord d'un estimateur Monte-Carlo seedé avec la référence analytique ;
+- la réduction de l'incertitude obtenue par control variate et par variates antithétiques à budget comparable.
+
+GitHub Actions exécute `cargo test --all-targets --locked` à chaque push et sur chaque pull request via `.github/workflows/ci.yml`.
+
+Pour lancer la suite localement :
+
+```bash
+cargo test --all-targets --locked
+```
+
 ## Structure du projet
 
 ```
-mc_pricer/
+mc-option-pricer/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── src/
+│   └── main.rs
 ├── Cargo.toml
-└── src/
-    └── main.rs
-plot_convergence.py   # génère convergence_mc.png à partir des résultats
+├── Cargo.lock
+├── plot_convergence.py
+├── results.csv
+└── convergence_mc.png
 ```
 
 ## Utilisation
